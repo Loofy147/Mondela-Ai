@@ -1,0 +1,81 @@
+graph TB
+    subgraph "External Zone (Untrusted)"
+        M1[Miner 1<br/>Python SDK]
+        M2[Miner 2<br/>Python SDK]
+        M3[Miner N<br/>Python SDK]
+        
+        M1 -->|"1. Fetch Task<br/>GET /api/v1/task"| API
+        M2 -->|"1. Fetch Task"| API
+        M3 -->|"1. Fetch Task"| API
+        
+        M1 -->|"5. Submit Claim<br/>POST /api/v1/submit<br/>(signed payload + artifact)"| API
+        M2 -->|"5. Submit Claim"| API
+        M3 -->|"5. Submit Claim"| API
+    end
+    
+    subgraph "Trusted Zone (Notary Server)"
+        API[Axum API Gateway<br/>TLS 1.3]
+        
+        API -->|"2. Rate Limit Check"| RL[Rate Limiter<br/>Redis INCR]
+        RL -->|"PASS"| AUTH
+        RL -->|"FAIL: 429"| M1
+        
+        AUTH[Auth Verifier<br/>Ed25519 Signature]
+        AUTH -->|"3. Get Public Key"| DB[(PostgreSQL<br/>miner_keys)]
+        AUTH -->|"PASS"| REPLAY
+        AUTH -->|"FAIL: 403"| M1
+        
+        REPLAY[Replay Detector<br/>Nonce Check]
+        REPLAY -->|"Check Nonce"| REDIS[(Redis Cache<br/>seen_nonces)]
+        REPLAY -->|"PASS"| HASH
+        REPLAY -->|"FAIL: 403"| M1
+        
+        HASH[Integrity Check<br/>SHA256 Verify]
+        HASH -->|"PASS"| SANDBOX
+        HASH -->|"FAIL: 400"| M1
+        
+        SANDBOX[WASM Sandbox<br/>Wasmtime Runtime]
+        SANDBOX -->|"Execute train.wasm"| DOCKER[Docker Container<br/>--network=none<br/>Memory: 4GB<br/>CPU: 10min]
+        
+        DOCKER -->|"Score Match"| LEDGER
+        DOCKER -->|"Score Mismatch: 422"| M1
+        
+        LEDGER[Ledger Writer]
+        LEDGER -->|"4. Persist Claim"| DB
+        LEDGER -->|"Store Artifact"| S3[(S3 Artifacts<br/>Permanent Storage)]
+        LEDGER -->|"SUCCESS: 202"| M1
+    end
+    
+    subgraph "Observability"
+        PROM[Prometheus<br/>Metrics Collector]
+        GRAF[Grafana<br/>Dashboards]
+        
+        API -.->|"Metrics Export"| PROM
+        SANDBOX -.->|"Metrics Export"| PROM
+        DB -.->|"Metrics Export"| PROM
+        REDIS -.->|"Metrics Export"| PROM
+        
+        PROM -.->|"Query"| GRAF
+    end
+    
+    subgraph "Data Flow Legend"
+        direction LR
+        L1[Solid Line: Request Flow]
+        L2[Dotted Line: Monitoring]
+    end
+    
+    style M1 fill:#ff6b6b
+    style M2 fill:#ff6b6b
+    style M3 fill:#ff6b6b
+    style API fill:#4ecdc4
+    style AUTH fill:#45b7d1
+    style REPLAY fill:#45b7d1
+    style HASH fill:#45b7d1
+    style SANDBOX fill:#f7b731
+    style DOCKER fill:#f7b731
+    style DB fill:#5f27cd
+    style REDIS fill:#5f27cd
+    style S3 fill:#5f27cd
+    style LEDGER fill:#00d2d3
+    style PROM fill:#95afc0
+    style GRAF fill:#95afc0

@@ -1,0 +1,253 @@
+# ============================================================================
+# ML-Chain Test Configuration
+# ============================================================================
+# pytest.ini - Configuration for the test suite
+#
+# Run tests: pytest
+# Run with coverage: pytest --cov=sdk --cov-report=html
+# Run adversarial only: pytest -m adversarial
+# Run fast tests only: pytest -m "not slow"
+
+[tool:pytest]
+# Test discovery
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+
+# Minimum Python version
+minversion = 7.0
+
+# Markers (custom test categories)
+markers =
+    adversarial: Red team attack tests (actively tries to break the system)
+    integration: Integration tests (requires running services)
+    unit: Unit tests (no external dependencies)
+    slow: Slow tests (>5 seconds)
+    security: Security-critical tests (must always pass)
+    phase1: Phase 1 features (foundation)
+    phase2: Phase 2 features (core loop)
+    phase3: Phase 3 features (sandbox integration)
+    replay_attack: Replay attack scenarios
+    signature_forgery: Signature forgery scenarios
+    rate_limiting: Rate limiting scenarios
+    integrity: Data integrity scenarios
+    timing_attack: Timing attack scenarios
+
+# Output options
+addopts =
+    # Verbose output
+    -v
+    # Show local variables in tracebacks
+    --showlocals
+    # Show summary of all test outcomes
+    -ra
+    # Strict markers (fail if unknown marker used)
+    --strict-markers
+    # Strict config (fail on config errors)
+    --strict-config
+    # Show warnings
+    -W default
+    # Capture output (can use -s to disable)
+    --capture=no
+    # Fail on first error (useful for debugging)
+    # -x
+    # Show slowest tests
+    --durations=10
+    # Color output
+    --color=yes
+    # Coverage (commented out by default, enable as needed)
+    # --cov=sdk
+    # --cov-report=html
+    # --cov-report=term-missing
+    # --cov-fail-under=80
+
+# Test timeout (prevent hanging tests)
+timeout = 300
+timeout_method = thread
+
+# Logging
+log_cli = true
+log_cli_level = INFO
+log_cli_format = %(asctime)s [%(levelname)8s] %(message)s
+log_cli_date_format = %Y-%m-%d %H:%M:%S
+
+log_file = logs/pytest.log
+log_file_level = DEBUG
+log_file_format = %(asctime)s [%(levelname)8s] %(name)s - %(message)s
+log_file_date_format = %Y-%m-%d %H:%M:%S
+
+# Warnings
+filterwarnings =
+    error
+    ignore::DeprecationWarning
+    ignore::PendingDeprecationWarning
+
+# Coverage options (if --cov is enabled)
+[coverage:run]
+source = sdk
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */venv/*
+    */virtualenv/*
+
+[coverage:report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+
+# ============================================================================
+# COMMON TEST COMMANDS
+# ============================================================================
+#
+# Run all tests:
+#   pytest
+#
+# Run adversarial tests only:
+#   pytest -m adversarial
+#
+# Run integration tests (requires services running):
+#   docker-compose up -d
+#   pytest -m integration
+#
+# Run fast tests only (exclude slow tests):
+#   pytest -m "not slow"
+#
+# Run security-critical tests:
+#   pytest -m security
+#
+# Run specific test file:
+#   pytest tests/test_adversarial.py
+#
+# Run specific test:
+#   pytest tests/test_adversarial.py::TestReplayAttacks::test_simple_replay
+#
+# Run tests matching a pattern:
+#   pytest -k "replay"
+#
+# Run tests with coverage:
+#   pytest --cov=sdk --cov-report=html
+#   # Open htmlcov/index.html in browser
+#
+# Run tests in parallel (requires pytest-xdist):
+#   pytest -n auto
+#
+# Run tests with detailed output:
+#   pytest -vv --tb=long
+#
+# Run tests and generate HTML report:
+#   pytest --html=reports/test-report.html --self-contained-html
+#
+# Run tests in watch mode (requires pytest-watch):
+#   ptw -- -v
+#
+# Debug a failing test:
+#   pytest --pdb tests/test_adversarial.py::test_failing_test
+#
+# Run only failed tests from last run:
+#   pytest --lf
+#
+# Run failed tests first, then all others:
+#   pytest --ff
+#
+# ============================================================================
+# CONTINUOUS INTEGRATION CONFIGURATION
+# ============================================================================
+#
+# GitHub Actions (recommended):
+#   - Run full test suite on every push
+#   - Run adversarial tests on every PR
+#   - Fail build if coverage drops below 80%
+#   - Upload coverage report to Codecov
+#
+# Example .github/workflows/test.yml:
+#   - name: Run tests
+#     run: |
+#       pytest --cov=sdk --cov-report=xml --junitxml=junit.xml
+#   - name: Upload coverage
+#     uses: codecov/codecov-action@v3
+#
+# ============================================================================
+# TEST ORGANIZATION BEST PRACTICES
+# ============================================================================
+#
+# 1. One test file per module:
+#    sdk/ml_chain_sdk.py → tests/test_ml_chain_sdk.py
+#
+# 2. Use descriptive test names:
+#    ✓ test_replay_attack_with_same_signature_rejected
+#    ✗ test_replay_attack
+#
+# 3. Use markers to organize tests:
+#    @pytest.mark.adversarial
+#    @pytest.mark.slow
+#    def test_expensive_operation():
+#        ...
+#
+# 4. Use fixtures for common setup:
+#    @pytest.fixture
+#    def legitimate_miner():
+#        return create_test_miner()
+#
+# 5. Document expected behavior:
+#    def test_rate_limit_enforced():
+#        """
+#        ATTACK: Submit 20 claims rapidly
+#        EXPECTED: After 10, rate limit kicks in with 429
+#        """
+#
+# 6. Fail fast on critical tests:
+#    @pytest.mark.security
+#    def test_signature_verification():
+#        # Must pass or build fails
+#
+# ============================================================================
+# ADVERSARIAL TESTING PHILOSOPHY
+# ============================================================================
+#
+# Every adversarial test should answer:
+# 1. What is the attack vector?
+# 2. What is the expected defense?
+# 3. What happens if the defense fails?
+#
+# Example structure:
+#   def test_my_attack():
+#       """
+#       ATTACK: Description of malicious behavior
+#       EXPECTED: How the system should defend
+#       IMPACT: What happens if unmitigated
+#       """
+#       # Setup attack
+#       # Execute attack
+#       # Verify defense
+#
+# Red Team Mindset:
+# - Assume the attacker has:
+#   * Source code access
+#   * Network monitoring capability
+#   * Moderate compute resources
+#   * Economic motivation
+#
+# - Test boundary conditions:
+#   * Maximum values
+#   * Minimum values
+#   * Edge cases
+#   * Race conditions
+#
+# - Test error handling:
+#   * Malformed input
+#   * Unexpected types
+#   * Missing fields
+#   * Null values
+#
+# ============================================================================

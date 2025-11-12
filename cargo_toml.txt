@@ -1,0 +1,144 @@
+[package]
+name = "ml-chain-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["ML-Chain Team <dev@ml-chain.network>"]
+description = "Notary Server for verifiable ML computation"
+license = "MIT"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database (PostgreSQL)
+sqlx = { version = "0.7", features = [
+    "postgres",
+    "runtime-tokio-rustls",
+    "uuid",
+    "chrono",
+    "json"
+] }
+
+# Cache (Redis)
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# UUID support
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Metrics (Prometheus)
+prometheus = "0.13"
+lazy_static = "1.4"
+
+# WASM Runtime (Phase 3)
+wasmtime = { version = "16", optional = true }
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+mockall = "0.12"
+proptest = "1.4"
+
+# HTTP testing
+reqwest = { version = "0.11", features = ["json"] }
+
+[features]
+default = []
+sandbox = ["wasmtime"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+
+[profile.test]
+opt-level = 0
+
+[[bin]]
+name = "ml-chain-server"
+path = "src/main.rs"
+
+# ============================================================================
+# SECURITY LINTING
+# ============================================================================
+# Run with: cargo clippy -- -D warnings
+# Run with: cargo audit
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"
+nursery = "warn"
+
+# Allow certain clippy lints that conflict with production patterns
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+# ============================================================================
+# CARGO AUDIT CONFIGURATION
+# ============================================================================
+# Add to .cargo/audit.toml:
+# [advisories]
+# db-path = "~/.cargo/advisory-db"
+# db-urls = ["https://github.com/rustsec/advisory-db"]
+# ignore = []
+
+# ============================================================================
+# DEPENDENCIES NOTES
+# ============================================================================
+# 
+# Security-Critical Dependencies:
+# - ed25519-dalek: Constant-time signature verification
+# - sqlx: Compile-time checked queries (prevents SQL injection)
+# - tower-http: Request size limits (DoS protection)
+# 
+# Performance-Critical Dependencies:
+# - tokio: High-performance async runtime
+# - redis: Sub-millisecond cache operations
+# - axum: Zero-cost abstractions for HTTP
+# 
+# Phase 3 Dependencies (behind feature flag):
+# - wasmtime: WASM sandbox runtime
+# 
+# Regular Security Updates:
+# - Run `cargo audit` on every build (CI enforced)
+# - Update dependencies monthly (except breaking changes)
+# - Monitor GitHub Security Advisories
+# 
+# ============================================================================

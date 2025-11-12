@@ -1,0 +1,605 @@
+# docker-compose.yml
+# ML-Chain Development Environment
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL - Permanent Ledger Storage
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: mlchain-postgres
+    environment:
+      POSTGRES_USER: mlchain
+      POSTGRES_PASSWORD: dev_password_change_in_prod
+      POSTGRES_DB: mlchain
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlchain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Redis - Ephemeral Cache (Nonces, Rate Limits)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: mlchain-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Notary Server (Rust/Axum)
+  # ============================================================================
+  notary_server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mlchain-notary
+    environment:
+      DATABASE_URL: postgres://mlchain:dev_password_change_in_prod@postgres:5432/mlchain
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info,mlchain=debug
+      SERVER_PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+    # Resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ============================================================================
+  # WASM Sandbox (Isolated Verification Environment)
+  # Phase 3 - Currently stubbed
+  # ============================================================================
+  # wasm_sandbox:
+  #   build:
+  #     context: ./sandbox
+  #     dockerfile: Dockerfile
+  #   container_name: mlchain-sandbox
+  #   environment:
+  #     WASMTIME_VERSION: "latest"
+  #   networks:
+  #     - mlchain_network
+  #   cap_drop:
+  #     - ALL
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   read_only: true
+  #   tmpfs:
+  #     - /tmp:rw,noexec,nosuid,size=1G
+
+  # ============================================================================
+  # Prometheus (Metrics Collection)
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mlchain-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Grafana (Metrics Visualization)
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mlchain-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+networks:
+  mlchain_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+---
+# sql/init.sql
+-- ML-Chain Database Schema
+-- Automatically executed when PostgreSQL container starts
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================================================
+-- MINER KEYS (Public Key Registry)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS miner_keys (
+    miner_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    public_key_hex TEXT NOT NULL UNIQUE,
+    stake_amount DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
+    registration_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    revocation_timestamp TIMESTAMPTZ,
+    revocation_reason TEXT,
+    
+    -- Constraints
+    CONSTRAINT stake_non_negative CHECK (stake_amount >= 0),
+    CONSTRAINT revoked_has_timestamp CHECK (
+        (is_active = TRUE AND revocation_timestamp IS NULL) OR
+        (is_active = FALSE AND revocation_timestamp IS NOT NULL)
+    )
+);
+
+-- Indexes
+CREATE INDEX idx_miner_keys_active ON miner_keys(is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_miner_keys_public_key ON miner_keys(public_key_hex);
+
+-- ============================================================================
+-- LEDGER (Immutable Record of Verified Claims)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS ledger (
+    id BIGSERIAL PRIMARY KEY,
+    submission_id UUID NOT NULL UNIQUE,
+    miner_id UUID NOT NULL REFERENCES miner_keys(miner_id),
+    task_id TEXT NOT NULL,
+    claimed_score DECIMAL(10, 8) NOT NULL,
+    verified_score DECIMAL(10, 8) NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    artifact_uri TEXT NOT NULL,
+    signature_hex TEXT NOT NULL UNIQUE,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    verification_duration_ms INTEGER NOT NULL,
+    nonce TEXT NOT NULL UNIQUE,
+    
+    -- Constraints
+    CONSTRAINT score_range CHECK (
+        claimed_score >= 0.0 AND claimed_score <= 1.0 AND
+        verified_score >= 0.0 AND verified_score <= 1.0
+    ),
+    CONSTRAINT verification_duration_positive CHECK (verification_duration_ms > 0)
+);
+
+-- Indexes for common queries
+CREATE INDEX idx_ledger_task_scores ON ledger(task_id, verified_score DESC);
+CREATE INDEX idx_ledger_miner_submissions ON ledger(miner_id, timestamp DESC);
+CREATE INDEX idx_ledger_timestamp ON ledger(timestamp DESC);
+CREATE INDEX idx_ledger_nonce ON ledger(nonce);
+CREATE INDEX idx_ledger_signature ON ledger(signature_hex);
+
+-- ============================================================================
+-- TASKS (Admin-Managed Task Definitions)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    performance_threshold DECIMAL(10, 8) NOT NULL,
+    metric TEXT NOT NULL,
+    dataset_hash TEXT NOT NULL,
+    optuna_storage_url TEXT NOT NULL,
+    wasm_template_url TEXT NOT NULL,
+    max_training_time_seconds INTEGER NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    
+    -- Constraints
+    CONSTRAINT threshold_range CHECK (
+        performance_threshold >= 0.0 AND performance_threshold <= 1.0
+    ),
+    CONSTRAINT max_time_positive CHECK (max_training_time_seconds > 0)
+);
+
+-- Index
+CREATE INDEX idx_tasks_active ON tasks(is_active) WHERE is_active = TRUE;
+
+-- ============================================================================
+-- AUDIT LOG (Security Events)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    miner_id UUID,
+    details JSONB,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index
+CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp DESC);
+CREATE INDEX idx_audit_log_event_type ON audit_log(event_type);
+CREATE INDEX idx_audit_log_miner ON audit_log(miner_id);
+
+-- ============================================================================
+-- INITIAL DATA (Development)
+-- ============================================================================
+
+-- Insert a test task
+INSERT INTO tasks (
+    task_id, 
+    performance_threshold, 
+    metric, 
+    dataset_hash, 
+    optuna_storage_url,
+    wasm_template_url,
+    max_training_time_seconds,
+    expires_at
+) VALUES (
+    'image-classification-cifar10-v2',
+    0.925,
+    'test_accuracy',
+    'sha256:a3f2c8b1d4e5f6789012345678901234',
+    'postgresql://optuna:password@postgres:5432/optuna',
+    'https://artifacts.ml-chain.network/train_v2.wasm',
+    600,
+    '2025-12-01T00:00:00Z'
+) ON CONFLICT (task_id) DO NOTHING;
+
+-- Insert a test miner (for development only)
+INSERT INTO miner_keys (
+    miner_id,
+    public_key_hex,
+    stake_amount
+) VALUES (
+    '550e8400-e29b-41d4-a716-446655440000',
+    'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+    100.0
+) ON CONFLICT (miner_id) DO NOTHING;
+
+-- Log initialization
+INSERT INTO audit_log (event_type, details) VALUES (
+    'database_initialized',
+    '{"version": "1.0.0", "timestamp": "' || NOW()::TEXT || '"}'
+);
+
+---
+# monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'mlchain-dev'
+
+scrape_configs:
+  # Notary Server Metrics
+  - job_name: 'notary_server'
+    static_configs:
+      - targets: ['notary_server:3000']
+        labels:
+          service: 'notary'
+    metrics_path: '/metrics'
+  
+  # PostgreSQL Exporter (requires postgres_exporter sidecar)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:9187']
+        labels:
+          service: 'database'
+  
+  # Redis Exporter (requires redis_exporter sidecar)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:9121']
+        labels:
+          service: 'cache'
+
+---
+# monitoring/grafana-datasources.yml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+---
+# monitoring/grafana-dashboards.yml
+apiVersion: 1
+
+providers:
+  - name: 'ML-Chain Dashboards'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+
+---
+# Makefile
+# ML-Chain Development Shortcuts
+
+.PHONY: help dev up down logs clean test test-adversarial db-reset
+
+help:
+	@echo "ML-Chain Development Commands"
+	@echo "=============================="
+	@echo "make dev              - Start full development environment"
+	@echo "make up               - Start services in background"
+	@echo "make down             - Stop all services"
+	@echo "make logs             - Tail all logs"
+	@echo "make clean            - Remove all containers and volumes"
+	@echo "make test             - Run standard tests"
+	@echo "make test-adversarial - Run red team tests"
+	@echo "make db-reset         - Reset database (DESTRUCTIVE)"
+
+dev:
+	docker-compose up
+
+up:
+	docker-compose up -d
+	@echo "✓ Services started"
+	@echo "→ Notary Server: http://localhost:3000"
+	@echo "→ Grafana: http://localhost:3001 (admin/admin)"
+	@echo "→ Prometheus: http://localhost:9090"
+
+down:
+	docker-compose down
+
+logs:
+	docker-compose logs -f
+
+clean:
+	docker-compose down -v
+	@echo "⚠ All data has been deleted!"
+
+test:
+	pytest tests/ -v --tb=short
+
+test-adversarial:
+	pytest tests/test_adversarial.py -v --html=reports/adversarial.html
+
+db-reset:
+	docker-compose exec postgres psql -U mlchain -d mlchain -f /docker-entrypoint-initdb.d/init.sql
+	@echo "✓ Database reset complete"
+
+---
+# server/Dockerfile
+# Rust Notary Server - Production-ready container
+
+FROM rust:1.75-slim as builder
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Cache dependencies
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Copy source code
+COPY src ./src
+
+# Build application
+RUN cargo build --release
+
+# ============================================================================
+# Runtime Stage
+# ============================================================================
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1001 mlchain
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/ml-chain-server /app/server
+
+# Set ownership
+RUN chown -R mlchain:mlchain /app
+
+# Switch to non-root user
+USER mlchain
+
+EXPOSE 3000
+
+CMD ["./server"]
+
+---
+# .github/workflows/ci.yml
+# Continuous Integration Pipeline
+
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ==========================================================================
+  # Rust Server Tests
+  # ==========================================================================
+  rust_tests:
+    name: Rust Tests & Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+      
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Cargo test
+        run: cargo test --all-features
+      
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+  # ==========================================================================
+  # Python SDK Tests
+  # ==========================================================================
+  python_tests:
+    name: Python Tests & Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install pytest mypy black bandit
+          pip install -r requirements.txt
+      
+      - name: Black format check
+        run: black --check sdk/
+      
+      - name: MyPy type check
+        run: mypy sdk/
+      
+      - name: Bandit security check
+        run: bandit -r sdk/ -ll
+      
+      - name: Pytest
+        run: pytest tests/ -v
+
+  # ==========================================================================
+  # Security Scanning
+  # ==========================================================================
+  security_scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ==========================================================================
+  # Integration Tests
+  # ==========================================================================
+  integration_tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run integration tests
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          sleep 10
+          pytest tests/integration/ -v
+          docker-compose -f docker-compose.test.yml down
