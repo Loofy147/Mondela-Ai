@@ -1,0 +1,158 @@
+# docker-compose.yml
+# ML-Chain Development Environment
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL - Permanent Ledger Storage
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: mlchain-postgres
+    environment:
+      POSTGRES_USER: mlchain
+      POSTGRES_PASSWORD: dev_password_change_in_prod
+      POSTGRES_DB: mlchain
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlchain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Redis - Ephemeral Cache (Nonces, Rate Limits)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: mlchain-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Notary Server (Rust/Axum)
+  # ============================================================================
+  notary_server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mlchain-notary
+    environment:
+      DATABASE_URL: postgres://mlchain:dev_password_change_in_prod@postgres:5432/mlchain
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info,mlchain=debug
+      SERVER_PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+    # Resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ============================================================================
+  # WASM Sandbox (Isolated Verification Environment)
+  # Phase 3 - Currently stubbed
+  # ============================================================================
+  # wasm_sandbox:
+  #   build:
+  #     context: ./sandbox
+  #     dockerfile: Dockerfile
+  #   container_name: mlchain-sandbox
+  #   environment:
+  #     WASMTIME_VERSION: "latest"
+  #   networks:
+  #     - mlchain_network
+  #   cap_drop:
+  #     - ALL
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   read_only: true
+  #   tmpfs:
+  #     - /tmp:rw,noexec,nosuid,size=1G
+
+  # ============================================================================
+  # Prometheus (Metrics Collection)
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mlchain-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Grafana (Metrics Visualization)
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mlchain-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - mlchain_network
+    restart: unless-stopped
+
+networks:
+  mlchain_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

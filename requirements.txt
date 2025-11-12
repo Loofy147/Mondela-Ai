@@ -1,0 +1,158 @@
+# ============================================================================
+# ML-Chain Python SDK Dependencies
+# ============================================================================
+# Installation: pip install -r requirements.txt
+# Python Version: 3.11+
+
+# Core Dependencies
+# ----------------------------------------------------------------------------
+
+# Cryptography (Ed25519 signatures)
+PyNaCl==1.5.0
+
+# HTTP client
+requests==2.31.0
+
+# Hyperparameter optimization
+optuna==3.5.0
+
+# Database driver (for Optuna storage)
+psycopg2-binary==2.9.9
+
+# Utilities
+python-dotenv==1.0.0
+
+# ============================================================================
+# Development Dependencies
+# ============================================================================
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-html==4.1.1
+pytest-mock==3.12.0
+
+# Type checking
+mypy==1.7.1
+types-requests==2.31.0.10
+
+# Code formatting
+black==23.12.0
+isort==5.13.2
+
+# Linting
+pylint==3.0.3
+flake8==6.1.0
+
+# Security scanning
+bandit==1.7.6
+safety
+
+# ============================================================================
+# Optional Dependencies (for advanced features)
+# ============================================================================
+
+# Machine Learning frameworks (not required by SDK, but common in use)
+# torch==2.1.2  # Uncomment if using PyTorch
+# tensorflow==2.15.0  # Uncomment if using TensorFlow
+# scikit-learn==1.3.2  # Uncomment if using scikit-learn
+
+# Data processing
+# pandas==2.1.4  # Uncomment if processing datasets
+# numpy==1.26.2  # Uncomment for numerical work
+
+# ============================================================================
+# Production Dependencies
+# ============================================================================
+
+# Monitoring (optional, for production miners)
+# prometheus-client==0.19.0
+
+# Logging (optional, structured logging)
+# structlog==23.2.0
+
+# ============================================================================
+# SECURITY NOTES
+# ============================================================================
+#
+# Critical Dependencies (must be kept updated):
+# - PyNaCl: Cryptographic library, security-critical
+# - requests: HTTP client, handles TLS verification
+# - psycopg2: Database driver, SQL injection prevention
+#
+# Security Update Schedule:
+# - Run `safety check` before every release
+# - Update dependencies monthly (except breaking changes)
+# - Monitor GitHub Security Advisories
+# - Use Dependabot for automated security updates
+#
+# Known Security Considerations:
+# 1. PyNaCl uses libsodium underneath (vetted crypto library)
+# 2. requests uses urllib3 for TLS (verify certificates by default)
+# 3. Never install dependencies from untrusted sources
+# 4. Always verify checksums when possible
+#
+# Recommended: Pin exact versions in production
+# - Use `pip freeze > requirements-lock.txt`
+# - Deploy from locked requirements
+# - Test upgrades in staging environment
+#
+# ============================================================================
+# COMPATIBILITY NOTES
+# ============================================================================
+#
+# Python Version Requirements:
+# - Minimum: Python 3.11 (for improved error messages)
+# - Recommended: Python 3.12 (for performance)
+# - Maximum: Python 3.12 (until dependencies support 3.13)
+#
+# Operating System Support:
+# - Linux: Full support (recommended)
+# - macOS: Full support
+# - Windows: Partial support (WSL2 recommended)
+#
+# Architecture Support:
+# - x86_64: Full support
+# - ARM64: Full support (Apple Silicon, AWS Graviton)
+# - Other: Not tested
+#
+# ============================================================================
+# INSTALLATION TROUBLESHOOTING
+# ============================================================================
+#
+# If `pip install PyNaCl` fails:
+#   - Ubuntu/Debian: sudo apt-get install python3-dev libsodium-dev
+#   - macOS: brew install libsodium
+#   - Windows: Use pre-built wheels (should work automatically)
+#
+# If `pip install psycopg2-binary` fails:
+#   - Ubuntu/Debian: sudo apt-get install libpq-dev
+#   - macOS: brew install postgresql
+#   - Windows: Use pre-built wheels (should work automatically)
+#
+# For development on Apple Silicon (M1/M2/M3):
+#   - Use native Python 3.11+ (not Rosetta)
+#   - All dependencies have ARM64 wheels
+#
+# ============================================================================
+# VIRTUAL ENVIRONMENT SETUP
+# ============================================================================
+#
+# Recommended workflow:
+#
+# 1. Create virtual environment:
+#    python3.11 -m venv venv
+#
+# 2. Activate:
+#    source venv/bin/activate  # Linux/macOS
+#    venv\Scripts\activate     # Windows
+#
+# 3. Install dependencies:
+#    pip install --upgrade pip
+#    pip install -r requirements.txt
+#
+# 4. Verify installation:
+#    python -c "import nacl, requests, optuna; print('OK')"
+#
+# ============================================================================
