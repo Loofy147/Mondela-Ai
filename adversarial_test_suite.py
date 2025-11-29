@@ -46,24 +46,18 @@ def legitimate_miner():
 
 
 @pytest.fixture
-def valid_artifact(tmp_path):
-    """Create a minimal valid artifact."""
-    artifact_path = tmp_path / "artifact.tar.gz"
+def valid_artifact_with_score(tmp_path):
+    """Create a valid artifact that prints a score."""
+    artifact_path = tmp_path / "artifact_with_score.tar.gz"
     
-    # Create minimal tarball
+    # Create a WASM module that prints "final score: 0.95"
+    # wat2wasm '(module (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32))) (memory 1) (data (i32.const 8) "final score: 0.95\n") (func (export "_start") (call $fd_write (i32.const 1) (i32.const 8) (i32.const 1) (i32.const 20)) (drop)))' -o score.wasm
+    wasm_path = tmp_path / "score.wasm"
+    wasm_path.write_bytes(b'\x00a\x73\x6d\x01\x00\x00\x00\x01\x11\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x02\x1a\x01\x17\x77\x61\x73\x69\x5f\x73\x6e\x61\x70\x73\x68\x6f\x74\x5f\x70\x72\x65\x76\x69\x65\x77\x31\x08\x66\x64\x5f\x77\x72\x69\x74\x65\x00\x00\x03\x02\x01\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06\x5f\x73\x74\x61\x72\x74\x00\x01\x0a\x11\x01\x0f\x00\x41\x01\x41\x08\x41\x01\x41\x14\x10\x00\x1a\x0b\x0b\x17\x01\x00\x41\x08\x0b\x13\x66\x69\x6e\x61\x6c\x20\x73\x63\x6f\x72\x65\x3a\x20\x30\x2e\x39\x35\x0a')
+
     import tarfile
     with tarfile.open(artifact_path, "w:gz") as tar:
-        # Add hyperparameters.json
-        hp_json = json.dumps({"learning_rate": 0.001, "batch_size": 32})
-        hp_info = tarfile.TarInfo(name="hyperparameters.json")
-        hp_info.size = len(hp_json)
-        tar.addfile(hp_info, fileobj=tarfile.io.BytesIO(hp_json.encode('utf-8')))
-        
-        # Add dummy train.wasm
-        wasm_data = b"\x00asm\x01\x00\x00\x00"  # WASM magic number
-        wasm_info = tarfile.TarInfo(name="train.wasm")
-        wasm_info.size = len(wasm_data)
-        tar.addfile(wasm_info, fileobj=tarfile.io.BytesIO(wasm_data))
+        tar.add(wasm_path, arcname="train.wasm")
     
     return artifact_path
 
@@ -616,6 +610,104 @@ class TestStressConditions:
             assert resp.status_code in [400, 403], \
                 f"Server should reject malformed JSON: {bad_payload[:50]}"
 
+
+# ============================================================================
+# ATTACK VECTOR 7: SANDBOX ESCAPES & ABUSES
+# ============================================================================
+
+class TestSandboxAttacks:
+    """Test the Wasmtime sandbox for vulnerabilities."""
+
+    def test_valid_submission_passes_sandbox(self, legitimate_miner, valid_artifact_with_score):
+        """
+        ATTACK: None. This is a sanity check.
+        EXPECTED: A valid, reproducible artifact should pass verification.
+        """
+        payload = {
+            "miner_id": legitimate_miner['miner_id'],
+            "task_id": "test-task",
+            "claimed_score": 0.95, # Matching the score in the artifact
+            "artifact_hash": compute_hash(valid_artifact_with_score),
+            "timestamp": time.time(),
+            "nonce": str(uuid.uuid4())
+        }
+
+        signature = sign_payload(payload, legitimate_miner['signing_key'])
+
+        files = {
+            'payload': (None, json.dumps(payload)),
+            'signature': (None, signature),
+            'artifact': ('artifact.tar.gz', open(valid_artifact_with_score, 'rb'))
+        }
+
+        resp = requests.post(f"{NOTARY_URL}/api/v1/submit", files=files)
+
+        assert resp.status_code in [200, 202]
+        assert "verified" in resp.json().get('status', '')
+
+    def test_inflated_score_fails_sandbox(self, legitimate_miner, valid_artifact_with_score):
+        """
+        ATTACK: Claim a score much higher than what the sandbox will produce.
+        EXPECTED: Verification fails with a score mismatch error.
+        """
+        payload = {
+            "miner_id": legitimate_miner['miner_id'],
+            "task_id": "test-task",
+            "claimed_score": 0.999, # Inflated score
+            "artifact_hash": compute_hash(valid_artifact_with_score),
+            "timestamp": time.time(),
+            "nonce": str(uuid.uuid4())
+        }
+
+        signature = sign_payload(payload, legitimate_miner['signing_key'])
+
+        files = {
+            'payload': (None, json.dumps(payload)),
+            'signature': (None, signature),
+            'artifact': ('artifact.tar.gz', open(valid_artifact_with_score, 'rb'))
+        }
+
+        resp = requests.post(f"{NOTARY_URL}/api/v1/submit", files=files)
+
+        assert resp.status_code == 422
+        assert "Score mismatch" in resp.json().get('details', '')
+
+    def test_infinite_loop_wasm_times_out(self, legitimate_miner, tmp_path):
+        """
+        ATTACK: Submit a WASM module that contains an infinite loop.
+        EXPECTED: Sandbox must time out and reject the submission with a 422 error.
+        """
+        # Create a WASM artifact with an infinite loop
+        # wat2wasm '(module (func (export "_start") (loop br 0)))' -o infinite.wasm
+        wasm_path = tmp_path / "infinite.wasm"
+        wasm_path.write_bytes(b'\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x07\x0a\x01\x06\x5f\x73\x74\x61\x72\x74\x00\x00\x0a\x06\x01\x04\x00\x03\x0c\x00\x0b')
+
+        import tarfile
+        artifact_path = tmp_path / "infinite_loop.tar.gz"
+        with tarfile.open(artifact_path, "w:gz") as tar:
+            tar.add(wasm_path, arcname="train.wasm")
+
+        payload = {
+            "miner_id": legitimate_miner['miner_id'],
+            "task_id": "test-task-infinite",
+            "claimed_score": 0.5,
+            "artifact_hash": compute_hash(artifact_path),
+            "timestamp": time.time(),
+            "nonce": str(uuid.uuid4())
+        }
+
+        signature = sign_payload(payload, legitimate_miner['signing_key'])
+
+        files = {
+            'payload': (None, json.dumps(payload)),
+            'signature': (None, signature),
+            'artifact': ('artifact.tar.gz', open(artifact_path, 'rb'))
+        }
+
+        resp = requests.post(f"{NOTARY_URL}/api/v1/submit", files=files, timeout=20)
+
+        assert resp.status_code == 422
+        assert "Sandbox execution timed out" in resp.json().get('details', '')
 
 # ============================================================================
 # MAIN TEST RUNNER

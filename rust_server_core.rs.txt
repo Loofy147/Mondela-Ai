@@ -30,7 +30,13 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
-
+use wasmtime::{Config, Engine, Linker, Module, Store, FrameInfo};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use anyhow::Context;
+use std::thread;
+use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::io::Write;
 // ============================================================================
 // CORE DATA STRUCTURES
 // ============================================================================
@@ -94,6 +100,7 @@ enum AppError {
     MinerNotFound,
     MinerRevoked,
     VerificationFailed(String),
+    SandboxTimeout,
 }
 
 impl IntoResponse for AppError {
@@ -143,6 +150,11 @@ impl IntoResponse for AppError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "verification_failed".to_string(),
                 Some(reason),
+            ),
+            AppError::SandboxTimeout => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "verification_failed".to_string(),
+                Some("Sandbox execution timed out after 10 minutes".to_string()),
             ),
         };
 
@@ -338,44 +350,115 @@ async fn check_rate_limit(
 }
 
 // ============================================================================
-// SANDBOX VERIFICATION (STUB - Phase 3)
+// SANDBOX VERIFICATION
 // ============================================================================
 
+struct WasiStdout(Arc<Mutex<Vec<u8>>>);
+
+impl Write for WasiStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+
 async fn verify_in_sandbox(
-    _artifact_data: &[u8],
+    artifact_data: Arc<Vec<u8>>,
     claimed_score: f64,
 ) -> Result<f64, AppError> {
-    // PHASE 3 TODO: Implement Wasmtime sandbox execution
-    // For now, we simulate verification with a tolerance check
-    
-    // Simulate sandbox execution time
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
-    // In Phase 3, this will:
-    // 1. Extract train.wasm from artifact
-    // 2. Spawn isolated Docker container
-    // 3. Execute WASM with resource limits
-    // 4. Capture performance score
-    // 5. Compare with claimed_score
-    
-    let simulated_score = claimed_score; // In reality, this comes from sandbox
+    let result = tokio::task::spawn_blocking(move || {
+        // Configure Wasmtime engine with epoch interruption
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).context("Failed to create Wasmtime engine")?;
+
+        // Spawn a ticker thread to increment the epoch
+        let engine_clone = engine.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                engine_clone.increment_epoch();
+            }
+        });
+
+        // Compile the module
+        let module = Module::from_binary(&engine, &artifact_data)
+            .context("Failed to compile WASM module")?;
+
+        // Create a shared buffer to capture stdout
+        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+        let stdout_clone = stdout_buf.clone();
+
+        // Set up WASI environment to pipe stdout to the buffer
+        let wasi = WasiCtxBuilder::new()
+            .stdout(Box::new(WasiStdout(stdout_clone)))
+            .build();
+        let mut store = Store::new(&engine, wasi);
+        store.set_epoch_deadline(10 * 60); // 10 minute timeout
+
+        // Link WASI imports
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi::add_to_linker(&mut linker, |s| s)
+            .context("Failed to link WASI")?;
+
+        // Instantiate the module and run the main function
+        let instance = linker.instantiate(&mut store, &module)
+            .context("Failed to instantiate module")?;
+        let main_func = instance.get_typed_func::<(), ()>(&mut store, "_start")
+            .context("`_start` function not found in module")?;
+
+        let result = main_func.call(&mut store, ());
+
+        if let Err(e) = result {
+            if e.to_string().contains("wasm trap: interrupt") {
+                return Err(anyhow::anyhow!("Sandbox timeout"));
+            }
+            return Err(e).context("WASM module execution failed");
+        }
+
+        // After execution, parse the score from stdout
+        let output = String::from_utf8(stdout_buf.lock().unwrap().clone())
+            .context("Failed to read stdout from WASM module")?;
+
+        let verified_score = output
+            .lines()
+            .filter(|line| line.contains("score"))
+            .last()
+            .and_then(|line| {
+                line.split_whitespace().last().and_then(|s| s.parse::<f64>().ok())
+            })
+            .context("Failed to parse score from WASM output")?;
+
+        Ok::<f64, anyhow::Error>(verified_score)
+    }).await.map_err(|e| AppError::VerificationFailed(format!("Sandbox execution panicked: {}", e)))?
+       .map_err(|e| {
+            if e.to_string().contains("Sandbox timeout") {
+                AppError::SandboxTimeout
+            } else {
+                AppError::VerificationFailed(format!("Sandbox execution failed: {}", e))
+            }
+        })?;
+
     let tolerance = 0.001;
-    
-    if (simulated_score - claimed_score).abs() > tolerance {
+    if (result - claimed_score).abs() > tolerance {
         return Err(AppError::VerificationFailed(format!(
             "Score mismatch: claimed {}, verified {}",
-            claimed_score, simulated_score
+            claimed_score, result
         )));
     }
-    
+
     tracing::info!(
         claimed = claimed_score,
-        verified = simulated_score,
+        verified = result,
         "Sandbox verification passed"
     );
-    
-    Ok(simulated_score)
+
+    Ok(result)
 }
+
 
 // ============================================================================
 // API HANDLERS
@@ -462,7 +545,8 @@ async fn submit_claim(
     }
     
     // 5. Sandbox Verification
-    let verified_score = verify_in_sandbox(&artifact_data, payload.claimed_score).await?;
+    let artifact_data_arc = Arc::new(artifact_data);
+    let verified_score = verify_in_sandbox(artifact_data_arc, payload.claimed_score).await?;
     
     // 6. Persist to Ledger
     let duration_ms = start_time.elapsed().as_millis() as i32;

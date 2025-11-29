@@ -61,6 +61,7 @@ lazy_static = "1.4"
 
 # WASM Runtime (Phase 3)
 wasmtime = { version = "16", optional = true }
+wasmtime-wasi = { version = "16", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -72,8 +73,8 @@ proptest = "1.4"
 reqwest = { version = "0.11", features = ["json"] }
 
 [features]
-default = []
-sandbox = ["wasmtime"]
+default = ["sandbox"]
+sandbox = ["wasmtime", "wasmtime-wasi"]
 
 [profile.release]
 opt-level = 3
