@@ -38,7 +38,7 @@ mypy==1.7.1
 types-requests==2.31.0.10
 
 # Code formatting
-black==24.3.0
+black==24.4.2
 isort==5.13.2
 
 # Linting
@@ -47,7 +47,8 @@ flake8==6.1.0
 
 # Security scanning
 bandit==1.7.6
-safety==2.3.5
+safety==3.7.0
+packaging==24.1
 
 # ============================================================================
 # Optional Dependencies (for advanced features)
